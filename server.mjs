@@ -1,10 +1,10 @@
 import express from 'express';
 import puppeteer from 'puppeteer';
 import bodyParser from 'body-parser';
-import { PDFDocument } from 'pdf-lib'; // Replace pdfkit with pdf-lib for merging
+import { PDFDocument } from 'pdf-lib';
 import fetch from 'node-fetch';
 import fs from 'fs/promises';
-import { createWriteStream } from 'fs';
+import path from 'path'; // Added for absolute path resolution
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -107,12 +107,26 @@ const generateSignatureHTML = async (signer) => {
   `;
 };
 
-// Function to fetch PDF from URL and return buffer
+const generateSignatureHTML = async (signer) => {
+  if (!signer || !signer.image || !signer.text) {
+    return '';
+  }
+  return `
+    <div class="signature-block">
+      <img src="${signer.image}" alt="${signer.text}">
+      <div style="margin-top: 10px;">
+        <p>${signer.text}</p>
+      </div>
+    </div>
+  `;
+};
+
 const fetchPDFBuffer = async (url) => {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch PDF from ${url}`);
-    return await response.buffer();
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   } catch (err) {
     console.error(`Error fetching PDF from ${url}:`, err);
     throw err;
@@ -129,7 +143,7 @@ app.post('/generate-pdf', async (req, res) => {
       htmlContent, 
       signatures = [],
       annexes = [],
-      attachments = [], // New field for PDF URLs
+      attachments = [],
       type = 'normal',
       offerLetter,
       acceptanceLetter 
@@ -196,7 +210,8 @@ app.post('/generate-pdf', async (req, res) => {
     const fetchImageAsBase64 = async (url) => {
       try {
         const response = await fetch(url);
-        const buffer = await response.buffer();
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
         return `data:image/png;base64,${buffer.toString('base64')}`;
       } catch (err) {
         console.error(`Failed to fetch image from ${url}:`, err);
@@ -290,15 +305,12 @@ app.post('/generate-pdf', async (req, res) => {
 
     await browser.close();
 
-    // Create final merged PDF
     const mergedPdf = await PDFDocument.create();
     
-    // Add main content pages
     const mainPdfDoc = await PDFDocument.load(mainPdfBuffer);
     const mainPages = await mergedPdf.copyPages(mainPdfDoc, mainPdfDoc.getPageIndices());
     mainPages.forEach(page => mergedPdf.addPage(page));
 
-    // Fetch and merge attachment PDFs
     if (attachments.length > 0) {
       for (const attachmentUrl of attachments) {
         try {
@@ -308,22 +320,36 @@ app.post('/generate-pdf', async (req, res) => {
           attachmentPages.forEach(page => mergedPdf.addPage(page));
         } catch (err) {
           console.error(`Failed to process attachment ${attachmentUrl}:`, err);
-          // Continue with next attachment instead of failing entirely
         }
       }
     }
 
     const finalPdfBuffer = await mergedPdf.save();
 
-    console.log('Final PDF generated, size:', finalPdfBuffer.length);
-    await fs.writeFile('debug_final_output.pdf', finalPdfBuffer);
-    console.log('Saved final PDF to debug_final_output.pdf');
+    // Save to disk as debug_final_output.pdf (this works fine)
+    const debugFilePath = 'debug_final_output.pdf';
+    console.log('Final PDF generated, size:', finalPdfBuffer.length, 'bytes');
+    await fs.writeFile(debugFilePath, finalPdfBuffer);
+    console.log('Saved final PDF to', debugFilePath);
 
-    res.contentType('application/pdf');
-    res.status(200).send(finalPdfBuffer);
+    // Send the debug_final_output.pdf file directly
+    console.log('Sending debug_final_output.pdf as response...');
+    res.sendFile(path.resolve(debugFilePath), (err) => {
+      if (err) {
+        console.error('Error sending file:', err);
+        if (!res.headersSent) {
+          res.status(500).send('Error sending PDF');
+        }
+      } else {
+        console.log('File sent successfully');
+      }
+    });
+
   } catch (err) {
     console.error('Error generating PDF:', err);
-    res.status(500).json({ error: 'PDF generation failed', message: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'PDF generation failed', message: err.message });
+    }
   }
 });
 
