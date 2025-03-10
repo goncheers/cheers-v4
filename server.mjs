@@ -1,7 +1,7 @@
 import express from 'express';
 import puppeteer from 'puppeteer';
 import bodyParser from 'body-parser';
-import PDFDocument from 'pdfkit'; // New library
+import { PDFDocument } from 'pdf-lib'; // Replace pdfkit with pdf-lib for merging
 import fetch from 'node-fetch';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -107,6 +107,18 @@ const generateSignatureHTML = async (signer) => {
   `;
 };
 
+// Function to fetch PDF from URL and return buffer
+const fetchPDFBuffer = async (url) => {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch PDF from ${url}`);
+    return await response.buffer();
+  } catch (err) {
+    console.error(`Error fetching PDF from ${url}:`, err);
+    throw err;
+  }
+};
+
 app.post('/generate-pdf', async (req, res) => {
   try {
     if (!req.body.htmlContent) {
@@ -117,9 +129,10 @@ app.post('/generate-pdf', async (req, res) => {
       htmlContent, 
       signatures = [],
       annexes = [],
-      type = 'normal', // Default to "normal" if not provided
-      offerLetter,     // Optional for "offer letter" type
-      acceptanceLetter // Optional for "offer letter" type
+      attachments = [], // New field for PDF URLs
+      type = 'normal',
+      offerLetter,
+      acceptanceLetter 
     } = req.body;
 
     console.log('Received type:', type);
@@ -129,7 +142,6 @@ app.post('/generate-pdf', async (req, res) => {
     const decodedOfferLetter = offerLetter ? decodeURIComponent(offerLetter) : null;
     const decodedAcceptanceLetter = acceptanceLetter ? decodeURIComponent(acceptanceLetter) : null;
 
-    // Validate offer letter parameters
     if (type === 'offer letter' && (!decodedOfferLetter || !decodedAcceptanceLetter)) {
       return res.status(400).json({ error: 'offerLetter and acceptanceLetter are required for "offer letter" type' });
     }
@@ -192,7 +204,6 @@ app.post('/generate-pdf', async (req, res) => {
       }
     };
 
-    // Replace image URLs with base64 data in all content
     const replaceImages = async (content) => {
       let updatedContent = content;
       for (const signer of signatures) {
@@ -218,7 +229,6 @@ app.post('/generate-pdf', async (req, res) => {
         <body>
     `;
 
-    // Handle different contract types
     if (type === 'normal') {
       fullContent += `
         ${contentWithBase64Images}
@@ -239,7 +249,6 @@ app.post('/generate-pdf', async (req, res) => {
         });
       }
     } else if (type === 'offer letter') {
-      // Offer letter: First page with company signatures, annexes without signatures, acceptance with counterparty signatures
       fullContent += `
         ${offerLetterWithBase64Images}
         ${companySignatureSection}
@@ -268,7 +277,7 @@ app.post('/generate-pdf', async (req, res) => {
 
     await page.setContent(fullContent, { waitUntil: 'networkidle0' });
 
-    const pdfBuffer = await page.pdf({
+    const mainPdfBuffer = await page.pdf({
       format: 'A4',
       printBackground: true,
       margin: {
@@ -281,12 +290,37 @@ app.post('/generate-pdf', async (req, res) => {
 
     await browser.close();
 
-    console.log('PDF generated, size:', pdfBuffer.length);
-    await fs.writeFile('debug_final_output.pdf', pdfBuffer);
+    // Create final merged PDF
+    const mergedPdf = await PDFDocument.create();
+    
+    // Add main content pages
+    const mainPdfDoc = await PDFDocument.load(mainPdfBuffer);
+    const mainPages = await mergedPdf.copyPages(mainPdfDoc, mainPdfDoc.getPageIndices());
+    mainPages.forEach(page => mergedPdf.addPage(page));
+
+    // Fetch and merge attachment PDFs
+    if (attachments.length > 0) {
+      for (const attachmentUrl of attachments) {
+        try {
+          const pdfBuffer = await fetchPDFBuffer(attachmentUrl);
+          const attachmentPdf = await PDFDocument.load(pdfBuffer);
+          const attachmentPages = await mergedPdf.copyPages(attachmentPdf, attachmentPdf.getPageIndices());
+          attachmentPages.forEach(page => mergedPdf.addPage(page));
+        } catch (err) {
+          console.error(`Failed to process attachment ${attachmentUrl}:`, err);
+          // Continue with next attachment instead of failing entirely
+        }
+      }
+    }
+
+    const finalPdfBuffer = await mergedPdf.save();
+
+    console.log('Final PDF generated, size:', finalPdfBuffer.length);
+    await fs.writeFile('debug_final_output.pdf', finalPdfBuffer);
     console.log('Saved final PDF to debug_final_output.pdf');
 
     res.contentType('application/pdf');
-    res.status(200).send(pdfBuffer);
+    res.status(200).send(finalPdfBuffer);
   } catch (err) {
     console.error('Error generating PDF:', err);
     res.status(500).json({ error: 'PDF generation failed', message: err.message });
