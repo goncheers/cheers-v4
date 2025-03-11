@@ -4,7 +4,9 @@ import bodyParser from 'body-parser';
 import { PDFDocument } from 'pdf-lib';
 import fetch from 'node-fetch';
 import fs from 'fs/promises';
-import path from 'path'; // Added for absolute path resolution
+import { createReadStream } from 'fs';
+
+
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -107,26 +109,11 @@ const generateSignatureHTML = async (signer) => {
   `;
 };
 
-const generateSignatureHTML = async (signer) => {
-  if (!signer || !signer.image || !signer.text) {
-    return '';
-  }
-  return `
-    <div class="signature-block">
-      <img src="${signer.image}" alt="${signer.text}">
-      <div style="margin-top: 10px;">
-        <p>${signer.text}</p>
-      </div>
-    </div>
-  `;
-};
-
 const fetchPDFBuffer = async (url) => {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch PDF from ${url}`);
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return await response.buffer();
   } catch (err) {
     console.error(`Error fetching PDF from ${url}:`, err);
     throw err;
@@ -210,8 +197,7 @@ app.post('/generate-pdf', async (req, res) => {
     const fetchImageAsBase64 = async (url) => {
       try {
         const response = await fetch(url);
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        const buffer = await response.buffer();
         return `data:image/png;base64,${buffer.toString('base64')}`;
       } catch (err) {
         console.error(`Failed to fetch image from ${url}:`, err);
@@ -326,30 +312,36 @@ app.post('/generate-pdf', async (req, res) => {
 
     const finalPdfBuffer = await mergedPdf.save();
 
-    // Save to disk as debug_final_output.pdf (this works fine)
+    // Save to disk as debug_final_output.pdf
     const debugFilePath = 'debug_final_output.pdf';
     console.log('Final PDF generated, size:', finalPdfBuffer.length, 'bytes');
     await fs.writeFile(debugFilePath, finalPdfBuffer);
     console.log('Saved final PDF to', debugFilePath);
 
-    // Send the debug_final_output.pdf file directly
-    console.log('Sending debug_final_output.pdf as response...');
-    res.sendFile(path.resolve(debugFilePath), (err) => {
-      if (err) {
-        console.error('Error sending file:', err);
-        if (!res.headersSent) {
-          res.status(500).send('Error sending PDF');
-        }
-      } else {
-        console.log('File sent successfully');
-      }
+    // Get file stats to confirm size
+    const stats = await fs.stat(debugFilePath);
+    console.log('Debug file size on disk:', stats.size, 'bytes');
+
+    // Stream the saved file as the response
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', stats.size); // Use actual file size
+    res.setHeader('Content-Disposition', 'attachment; filename="output.pdf"');
+
+    const fileStream = createReadStream(debugFilePath);
+    fileStream.pipe(res);
+
+    fileStream.on('error', (err) => {
+      console.error('Error streaming file:', err);
+      res.status(500).end('Error streaming PDF');
+    });
+
+    fileStream.on('end', () => {
+      console.log('File streaming completed');
     });
 
   } catch (err) {
     console.error('Error generating PDF:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'PDF generation failed', message: err.message });
-    }
+    res.status(500).json({ error: 'PDF generation failed', message: err.message });
   }
 });
 
