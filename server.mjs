@@ -12,7 +12,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Middleware to handle JSON content
-app.use(bodyParser.json({ limit: '10mb' }));  // For application/json
+app.use(bodyParser.json({ limit: '20mb' }));  // For application/json
 
 // Static styles for the table
 const staticTableStyles = `
